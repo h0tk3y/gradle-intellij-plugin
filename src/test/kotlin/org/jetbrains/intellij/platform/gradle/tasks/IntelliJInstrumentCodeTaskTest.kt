@@ -5,9 +5,10 @@ package org.jetbrains.intellij.platform.gradle.tasks
 import org.gradle.testkit.runner.TaskOutcome
 import org.jetbrains.intellij.platform.gradle.*
 import org.jetbrains.intellij.platform.gradle.Constants.Tasks
-import kotlin.io.path.exists
+import kotlin.io.path.*
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 
 private const val ASSEMBLE = "assemble"
@@ -158,6 +159,94 @@ class IntelliJInstrumentCodeTaskTest : IntelliJPluginTestBase() {
     }
 
     @Test
+    fun `instrumented test code does not keep classes of removed Kotlin tests when using build cache`() {
+        enableLocalBuildCache()
+
+        buildFile write //language=kotlin
+                """
+                dependencies {
+                    testImplementation("junit:junit:4.13.2")
+                }
+
+                intellijPlatform {
+                    instrumentCode = true
+                }
+                """.trimIndent()
+
+        writeTestFile()
+        val firstKotlinTest = writeKotlinTestFile("FirstKotlinTest")
+        writeKotlinTestFile("SecondKotlinTest")
+
+        buildWithConfigurationCache(Tasks.External.TEST, args = buildCacheArgs) {
+            assertTaskOutcome(Tasks.INSTRUMENT_TEST_CODE, TaskOutcome.SUCCESS)
+        }
+        assertInstrumentedTestClasses("AppTest.class", "pack/FirstKotlinTest.class", "pack/SecondKotlinTest.class")
+        assertExecutedTests("AppTest", "pack.FirstKotlinTest", "pack.SecondKotlinTest")
+
+        // Remove a single Kotlin test, so the Kotlin test classes directory still exists.
+        firstKotlinTest.deleteExisting()
+
+        buildWithConfigurationCache(Tasks.External.TEST, args = buildCacheArgs)
+        assertInstrumentedTestClasses("AppTest.class", "pack/SecondKotlinTest.class")
+        assertExecutedTests("AppTest", "pack.SecondKotlinTest")
+
+        // Remove all Kotlin tests, so `compileTestKotlin` has no sources and its classes directory is deleted.
+        delete("src/test/kotlin")
+
+        buildWithConfigurationCache(Tasks.External.TEST, args = buildCacheArgs)
+        assertInstrumentedTestClasses("AppTest.class")
+        assertExecutedTests("AppTest")
+
+        // Build again from scratch, so the instrumented classes are restored from the build cache.
+        deleteBuildOutputs()
+
+        buildWithConfigurationCache(Tasks.External.TEST, args = buildCacheArgs) {
+            assertTaskOutcome(Tasks.INSTRUMENT_TEST_CODE, TaskOutcome.FROM_CACHE)
+        }
+        assertInstrumentedTestClasses("AppTest.class")
+        assertExecutedTests("AppTest")
+    }
+
+    @Test
+    fun `instrumented code does not keep classes of removed Kotlin sources when using build cache`() {
+        enableLocalBuildCache()
+
+        buildFile write //language=kotlin
+                """
+                intellijPlatform {
+                    instrumentCode = true
+                }
+                """.trimIndent()
+
+        writeJavaFile()
+        dir.resolve("src/main/kotlin/pack/Removed.kt") write //language=kotlin
+                """
+                package pack
+
+                class Removed
+                """.trimIndent()
+
+        buildWithConfigurationCache(Tasks.INSTRUMENT_CODE, args = buildCacheArgs) {
+            assertTaskOutcome(Tasks.INSTRUMENT_CODE, TaskOutcome.SUCCESS)
+        }
+        assertInstrumentedClasses(Tasks.INSTRUMENT_CODE, "App.class", "pack/Removed.class")
+
+        // Remove all Kotlin sources, so `compileKotlin` has no sources and its classes directory is deleted.
+        delete("src/main/kotlin")
+
+        buildWithConfigurationCache(Tasks.INSTRUMENT_CODE, args = buildCacheArgs)
+        assertInstrumentedClasses(Tasks.INSTRUMENT_CODE, "App.class")
+
+        // Build again from scratch, so the instrumented classes are restored from the build cache.
+        deleteBuildOutputs()
+
+        buildWithConfigurationCache(Tasks.INSTRUMENT_CODE, args = buildCacheArgs) {
+            assertTaskOutcome(Tasks.INSTRUMENT_CODE, TaskOutcome.FROM_CACHE)
+        }
+        assertInstrumentedClasses(Tasks.INSTRUMENT_CODE, "App.class")
+    }
+
+    @Test
     fun `serializes instrumentation tasks within a project`() {
         dir.resolve("src/alpha/java/Alpha.java") write "class Alpha {}"
         dir.resolve("src/beta/java/Beta.java") write "class Beta {}"
@@ -245,4 +334,48 @@ class IntelliJInstrumentCodeTaskTest : IntelliJPluginTestBase() {
             assertConfigurationCacheReused()
         }
     }
+
+    private val buildCacheArgs = listOf("--build-cache")
+
+    private fun enableLocalBuildCache() {
+        settingsFile write //language=kotlin
+                """
+                buildCache {
+                    local {
+                        directory = file("build-cache")
+                    }
+                }
+                """.trimIndent()
+    }
+
+    private fun writeKotlinTestFile(name: String) = dir.resolve("src/test/kotlin/pack/$name.kt").ensureExists() write //language=kotlin
+            """
+            package pack
+
+            import org.junit.Test
+
+            class $name {
+                @Test
+                fun testSomething() {}
+            }
+            """.trimIndent()
+
+    @OptIn(ExperimentalPathApi::class)
+    private fun delete(vararg paths: String) = paths.forEach {
+        dir.resolve(it).deleteRecursively()
+    }
+
+    private fun deleteBuildOutputs() = delete("build/classes", "build/instrumented", "build/test-results")
+
+    private fun assertInstrumentedClasses(taskName: String, vararg expected: String) = assertEquals(
+        expected.toSet(),
+        collectPaths(dir.resolve("build/instrumented/$taskName")).filter { it.endsWith(".class") }.toSet(),
+    )
+
+    private fun assertInstrumentedTestClasses(vararg expected: String) = assertInstrumentedClasses(Tasks.INSTRUMENT_TEST_CODE, *expected)
+
+    private fun assertExecutedTests(vararg expected: String) = assertEquals(
+        expected.toSet(),
+        dir.resolve("build/test-results/test").listDirectoryEntries("TEST-*.xml").map { it.name.removePrefix("TEST-").removeSuffix(".xml") }.toSet(),
+    )
 }

@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- Fix `instrumentCode` and `instrumentTestCode` keeping classes of removed sources when a whole classes directory is deleted, for example when all Kotlin sources are removed, which also stored the stale classes in the build cache.
 - Reject failed DMG copies, remove partial output, and preserve the original error while unmounting the image.
 - Shorten archive transform output paths so the Windows Java launcher can locate its JVM library in Gradle nightly caches.
 - Expose the actual Gradle user home to IDE test processes so VFS access checks allow dependency caches outside the user's home directory, including custom TestKit caches.
